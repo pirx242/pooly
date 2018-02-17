@@ -24,7 +24,9 @@ In each listener you have a pool with the same two backends: backend1, backend2
 Additionally, in mydomain:443 you have a special service that filters on some url pattern, and that service only contains backend2.
 
 This will disable backend1 in both services that contain both backends.
-```$ sudo pooly -d backend1```
+```
+$ sudo pooly -d backend1
+```
 
 This will disable backend2 in both services that contain both backends, but *not* in that third special service.
 ```
@@ -33,7 +35,7 @@ $ sudo pooly -d backend2
 
 This will disable backend2 in all three services.
 ```
-$ sudo pooly -f -d backend2
+$ sudo pooly -s -f -d backend2
 ```
 
 This will disable backend2 in only the pool that is in the Listener that listens on port 80.
@@ -42,13 +44,19 @@ $ sudo pooly -L mydomain:80 -d backend2
 ```
 
 This will disable the whole ListenHTTPS listener.
+```
 $ sudo pooly -D mydomain:443
+```
 
 This will print all your listeners and pools.
+```
 $ sudo pooly
+```
 
 This will print all your listeners and services, even those with just one single backend in them.
+```
 $ sudo pooly -s
+```
 
 
 #### Lastly...
