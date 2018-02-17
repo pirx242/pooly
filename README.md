@@ -24,7 +24,8 @@ In each listener you have a pool with the same two backends: backend1, backend2
 Additionally, in mydomain:443 you have a special service that filters on some url pattern, and that service only contains backend2.
 
 This will disable backend1 in both services that contain both backends.
-	$ sudo pooly -d backend1
+
+ $ sudo pooly -d backend1
 
 This will disable backend2 in both services that contain both backends, but *not* in that third special service.
 $ sudo pooly -d backend2
