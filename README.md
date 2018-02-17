@@ -1,6 +1,6 @@
 #### POOLY - A POUNDCTL WRAPPER WITH PRETTY FORMATTING
 
-_pooly_ is a simple Python script that provides a more user friendly interface to Pound (than poundctl).
+`pooly` is a simple Python script that provides a more user friendly interface to Pound (than poundctl).
 Actually though, it's a wrapper around poundctl.
 
 The focus for pooly is to handle _pools_ (a service that contains more than one backend) of backends.
@@ -9,7 +9,7 @@ backend in all pools, pooly will do this easily for you.
 The reason for this is that disabling backends in services that only contain that single backend makes
 less sense, because that essentially disables the whole listener, and then you might just as well just
 shut down the backend.
-(NOTE: i havent looked in to how this works with emergency backends though)
+_(Note: i havent looked in to how this works with emergency backends though)_
 
 This wrapper script also does some sanity checking for you. It will not disable a backend in a service
 if that is the last enabled backend, unless -f is used.
