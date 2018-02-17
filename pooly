@@ -22,7 +22,7 @@ parser.add_option('-v', action='store_true', dest='verbose', default=False, help
 parser.add_option('-f', action='store_true', dest='force', default=False, help = 'force')
 parser.add_option('-n', action='store_true', dest='numerical', default=False, help = 'numerical - use IPnrs (instead of hostnames)')
 parser.add_option('-m', action='store_true', dest='monochrome', default=False, help = 'monochrome - dont use colors')
-parser.add_option('-s', action='store_true', dest='singular', default=False, help = 'singular - also show services with just 1 backend')
+parser.add_option('-s', action='store_true', dest='singular', default=False, help = 'singular - also show (and act on) services with just 1 backend')
 parser.add_option('-e', action='append', type='string', dest='enable_backends', metavar='backend[:port]', default=[], help = 'enable backend - can be repeated')
 parser.add_option('-d', action='append', type='string', dest='disable_backends', metavar='backend[:port]', default=[], help = 'disable backend - can be repeated')
 parser.add_option('-L', action='store', type='string', dest='listener', metavar='listener[:port]', default='', help = 'listener - only act on this listener(s), this is a simple "string.*" match against listener names, including port.')
@@ -39,7 +39,7 @@ PCTL_SOCK = '/var/run/pound/poundctl.socket'
 OUT = '/tmp/poundctl.%i.out' % (pid)
 ERR = '/tmp/poundctl.%i.err' % (pid)
 
-VERSION = '1.0.0'
+VERSION = '1.0'
 
 if not opts.monochrome and has_color:
 	use_color = True
