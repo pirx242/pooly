@@ -1,0 +1,481 @@
+#!/usr/bin/env python2
+
+from subprocess import call
+from sys import argv, exit
+from os import getpid, unlink
+from optparse import OptionParser
+from socket import socket
+
+try:
+	from colorama import Fore, Back, Style
+	has_color = True
+except:
+	has_color = False
+
+if has_color:
+	parser = OptionParser()
+else:
+	parser = OptionParser(epilog="If you want colorized output, make sure to have the 'colorama' python package installed. No specified option just prints the current state of listeners/backends.")
+
+parser.set_usage('%prog [options]')
+parser.add_option('-v', action='store_true', dest='verbose', default=False, help = 'verbose')
+parser.add_option('-f', action='store_true', dest='force', default=False, help = 'force')
+parser.add_option('-n', action='store_true', dest='numerical', default=False, help = 'numerical - use IPnrs (instead of hostnames)')
+parser.add_option('-m', action='store_true', dest='monochrome', default=False, help = 'monochrome - dont use colors')
+parser.add_option('-s', action='store_true', dest='singular', default=False, help = 'singular - also show services with just 1 backend')
+parser.add_option('-e', action='append', type='string', dest='enable_backends', metavar='backend[:port]', default=[], help = 'enable backend - can be repeated')
+parser.add_option('-d', action='append', type='string', dest='disable_backends', metavar='backend[:port]', default=[], help = 'disable backend - can be repeated')
+parser.add_option('-L', action='store', type='string', dest='listener', metavar='listener[:port]', default='', help = 'listener - only act on this listener(s), this is a simple "string.*" match against listener names, including port.')
+parser.add_option('-E', action='store_true', dest='enable_listener', default=False, help = 'enable listener')
+parser.add_option('-D', action='store_true', dest='disable_listener', default=False, help = 'disable listener')
+parser.add_option('--version', action='store_true', dest='version', default=False, help = 'version')
+
+(opts, args) = parser.parse_args(argv[1:])
+pid = getpid()
+
+PCTL_BIN = '/usr/sbin/poundctl'
+PCTL_SOCK = '/var/run/pound/poundctl.socket'
+
+OUT = '/tmp/poundctl.%i.out' % (pid)
+ERR = '/tmp/poundctl.%i.err' % (pid)
+
+VERSION = '1.0.0'
+
+if not opts.monochrome and has_color:
+	use_color = True
+else:
+	use_color = False
+
+for o in opts.enable_backends + opts.disable_backends + [opts.listener]:
+	if o.startswith('-'):
+		print 'This was accidentally taken as an option argument: %s  (perhaps you forgot a hostname/IP after previous option?)' % (o)
+		exit(21)
+
+if opts.singular and (opts.enable_backends or opts.disable_backends) and not opts.force:
+	print 'You must use -f if you want to use -s with -e/-d.'
+	exit(42)
+
+if (opts.enable_listener or opts.disable_listener):
+	if opts.enable_backends or opts.disable_backends:
+		print 'You can not mix -E/-D with -e/-d.'
+		exit(42)
+	if not opts.listener:
+		print 'You must specify -L with -E/-D.'
+		exit(42)
+
+def split_ipp(ipp):
+	tmp = ipp.split(':')
+	if len(tmp) == 2:
+		return (tmp[0], tmp[1])
+	else:
+		return (tmp[0], None)
+
+def interpret_line(line):
+	index = None
+	line_type = None
+	ipp = None
+	ip = None
+	port = None
+	proto = None
+	active = None
+	alive = None
+	really_alive = None
+
+	sline = line.split()
+
+	if (' Backend ' in line):
+		line_type = 'backend'
+		ipp = sline[2]
+		active = sline[3]
+		alive = sline[-1]
+	elif (' Service ' in line):
+		line_type = 'service'
+		active = sline[2]
+	elif (' Listener ' in line):
+		line_type = 'listener'
+		proto = sline[1]
+		ipp = sline[3]
+		active = sline[4]
+	elif ('Requests in queue' in line):
+		line_type = 'queue'
+	elif ('Global services' in line):
+		line_type = 'global services'
+	else:
+		print 'Unknown line:', line
+		exit(1)
+
+	if ipp:
+		(ip, port) = split_ipp(ipp)
+
+	if not line_type == 'queue':
+		index = line[0: line.index('.')].strip()
+
+
+	return (line_type, index, ip, port, proto, active, alive, ipp)
+
+def get_pools(lines):
+	pools = []
+	backend_alive_pings = {}
+
+	listener = None
+	service = None
+	backends = []
+
+	prev_type = None
+	for line in lines:
+		(line_type, index, ip, port, proto, active, alive, ipp) = interpret_line(line)
+
+		if line_type == 'backend':
+			backends.append([index, ip, port, active, alive, ipp])
+		else:
+			if len(backends) > 1 or (len(backends) == 1 and opts.singular):
+				for backend in backends:
+					if not backend[5] in backend_alive_pings:
+						backend_alive_pings[backend[5]] = is_really_alive(backend[1], backend[2])
+				pools.append((listener, service, backends))
+			backends = []
+
+			if line_type == 'service':
+				service = (index, active)
+			elif line_type == 'listener':
+				listener = [index, ip, port, proto, active]
+				service = None
+			elif line_type == 'global services':
+				listener = None
+				service = None
+			else:
+				True
+
+		prev_type = line_type
+
+	return (pools, backend_alive_pings)
+
+def pretty_print_pools(pools, backend_alive_pings):
+	for pool in pools:
+		l_ip = pool[0][1]
+		l_port = pool[0][2]
+		l_proto = pool[0][3]
+		l_active = pool[0][4]
+		s_active = pool[1][1]
+
+		if opts.listener:
+			l_ipp = l_ip + ':' + l_port
+			if not l_ipp.startswith(opts.listener):
+				continue
+
+		if opts.verbose:
+			indexes = ' (L=%s/S=%s)' % (pool[0][0], pool[1][0])
+		else:
+			indexes = ''
+
+		if l_active == 'a':
+			print '%s (%s) %s/%s%s' % (colorize_foreground('%s:%s' % (l_ip, l_port), 'blue'), l_proto, colorize_foreground(l_active, 'green'), possibly_colorize(s_active), indexes)
+		else:
+			print '%s (%s) %s/%s%s' % (colorize_foreground('%s:%s' % (l_ip, l_port), 'red'), l_proto, colorize_foreground(l_active, 'red'), possibly_colorize(s_active), indexes)
+
+		for backend in pool[2]:
+			b_index = backend[0]
+			b_ip = backend[1]
+			b_port = backend[2]
+			b_active = backend[3]
+			b_alive = backend[4]
+			b_ipp = backend[5]
+
+			b_really_alive = backend_alive_pings[b_ipp]
+
+			if opts.verbose:
+				comment = ''
+				if b_alive == 'alive':
+					if not b_really_alive:
+						comment = ' (%s)' % (colorize_foreground('but really DEAD', 'red'))
+				else:
+					if b_really_alive:
+						comment = ' (%s)' % (colorize_foreground('but really alive', 'green'))
+
+				#comment += ' (B=%s)' % (b_index)
+				print '  %s:%s %s/%s%s' % (b_ip, b_port, possibly_colorize(b_active), possibly_colorize(b_alive), comment)
+			else:
+				if b_really_alive:
+					b_alive = 'alive'
+				else:
+					b_alive = 'DEAD'
+
+				print '  %s:%s %s/%s' % (b_ip, b_port, possibly_colorize(b_active), possibly_colorize(b_alive))
+
+
+def possibly_colorize(text):
+	if use_color:
+		if text == 'active': return colorize_foreground(text, 'green')
+		if text == 'DISABLED': return colorize_foreground(text, 'yellow')
+		if text == 'DEAD': return colorize_foreground(text, 'red')
+		if text == 'alive': return text
+		return colorize_foreground(text, 'magenta')
+	else:
+		return text
+
+# Available formatting constants are:
+# Fore: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.
+# Back: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, RESET.
+# Style: DIM, NORMAL, BRIGHT, RESET_ALL
+def colorize_foreground(text, color):
+	if use_color:
+		try:
+			c = {'black': Fore.BLACK, 'red': Fore.RED, 'green': Fore.GREEN, 'yellow': Fore.YELLOW, 'blue': Fore.BLUE, 'magenta': Fore.MAGENTA, 'cyan': Fore.CYAN, 'white': Fore.WHITE, 'reset': Fore.RESET} [color]
+			return c + text + Fore.RESET
+		except KeyError, e:
+			print colorize_foreground('ERROR: no such color key "%s"' % (e.message), 'red')
+			return text
+	else:
+		return text
+
+
+def run_poundctl(*args):
+	out = open(OUT, 'w')
+	err = open(ERR, 'w')
+
+	if opts.numerical:
+		pctl_args = [PCTL_BIN, '-c', PCTL_SOCK]
+	else:
+		pctl_args = [PCTL_BIN, '-c', PCTL_SOCK, '-H']
+
+	for a in args[0]:
+		pctl_args.append(a)
+
+	try:
+		r = call(pctl_args, stdout=out.fileno(), stderr=err.fileno())
+	except Exception, e:
+		print 'Failed to execute %s:' % (PCTL_BIN), e
+		exit(2)
+
+	out.close()
+	err.close()
+
+	out_lines = [ l.rstrip() for l in open(OUT).readlines()]
+	err_lines = [ l.rstrip() for l in open(ERR).readlines()]
+
+	unlink(OUT)
+	unlink(ERR)
+
+	if r:
+		return (r, err_lines)
+	else:
+		return (r, out_lines)
+
+
+
+def show(pools, backend_alive_pings):
+	pretty_print_pools(pools, backend_alive_pings)
+
+
+def is_really_alive(host, port):
+	try:
+		s = socket()
+		s.connect((host, int(port)))
+		s.close()
+		return True
+	except:
+		return False
+
+
+def enable_backends(pools, backend_alive_pings, enable_backends):
+	to_be_enabled = {}
+	for ebe in enable_backends:
+		(e_ip, e_port) = split_ipp(ebe)
+		to_be_enabled[e_ip] = e_port
+
+	for pool in pools:
+		(listener, service, backends) = pool
+		li = listener[0]
+		l_ip = listener[1]
+		l_port = listener[2]
+		l_proto  = listener[3]
+
+		ipp = l_ip + ':' + l_port
+		if opts.listener and not ipp.startswith(opts.listener):
+			continue
+
+		si = service[0]
+
+		for backend in backends:
+			bi = backend[0]
+			b_ip = backend[1]
+			b_port = backend[2]
+			b_active = backend[3]
+			b_ipp = backend[5]
+			b_really_alive = backend_alive_pings[b_ipp]
+
+			if b_ip not in to_be_enabled: continue
+			if to_be_enabled[b_ip] and to_be_enabled[b_ip] != b_port: continue
+
+			if b_active == 'active':
+				print colorize_foreground('Already active:', 'white'), '%s:%s (%s) - %s:%s' % (l_ip, l_port, l_proto, b_ip, b_port)
+			else:
+				if b_really_alive or opts.force:
+					print colorize_foreground('Enabling:', 'green'), '%s:%s (%s) - %s:%s' % (l_ip, l_port, l_proto, b_ip, b_port),
+					(r, lines) = run_poundctl(['-B', li, si, bi])
+					if r:
+						print colorize_foreground('FAILED', 'red')
+						for line in lines:
+							print line
+					else:
+						print colorize_foreground('DONE', 'white')
+						backend[3] = 'active'
+				else:
+					print colorize_foreground('Skipping(dead):', 'yellow'), '%s:%s (%s) - %s:%s' % (l_ip, l_port, l_proto, b_ip, b_port)
+
+
+
+
+def disable_backends(pools, backend_alive_pings, disable_backends):
+	to_be_disabled = {}
+	for ebe in disable_backends:
+		(e_ip, e_port) = split_ipp(ebe)
+		to_be_disabled[e_ip] = e_port
+
+	for pool in pools:
+		(listener, service, backends) = pool
+		li = listener[0]
+		l_ip = listener[1]
+		l_port = listener[2]
+		l_proto  = listener[3]
+
+		ipp = l_ip + ':' + l_port
+		if opts.listener and not ipp.startswith(opts.listener):
+			continue
+
+		si = service[0]
+
+		for backend in backends:
+			bi = backend[0]
+			b_ip = backend[1]
+			b_port = backend[2]
+			b_active = backend[3]
+			b_ipp = backend[5]
+			b_really_alive = backend_alive_pings[b_ipp]
+
+			if b_ip not in to_be_disabled: continue
+			if to_be_disabled[b_ip] and to_be_disabled[b_ip] != b_port: continue
+
+			if b_active == 'active':
+				nr_of_other_working_backends = 0
+				for b in backends:
+					if b[0] == bi:
+						continue
+					other_b_active = b[3]
+					other_b_alive = backend_alive_pings[b[5]]
+					if other_b_alive and other_b_active == 'active':
+						nr_of_other_working_backends += 1
+
+				if nr_of_other_working_backends > 0:
+					do_disable = True
+				else:
+					if opts.force:
+						do_disable = True
+					else:
+						if not b_really_alive:
+							do_disable = True
+						else:
+							print colorize_foreground('Skipping(no other working backends exist in this pool):', 'red'), '%s:%s (%s) - %s:%s' % (l_ip, l_port, l_proto, b_ip, b_port)
+							do_disable = False
+
+				if do_disable:
+					print colorize_foreground('Disabling:', 'yellow'), '%s:%s (%s) - %s:%s' % (l_ip, l_port, l_proto, b_ip, b_port),
+					(r, lines) = run_poundctl(['-b', li, si, bi])
+					if r:
+						print colorize_foreground('FAILED', 'red')
+						for line in lines:
+							print line
+					else:
+						print colorize_foreground('DONE', 'white')
+						backend[3] = 'DISABLED'
+			else:
+				print colorize_foreground('Already disabled:', 'white'), '%s:%s (%s) - %s:%s' % (l_ip, l_port, l_proto, b_ip, b_port)
+
+
+def handle_listener(pools, disable_listener, action):
+	if action == 'DISABLE':
+		info = 'Disabling:'
+		color = 'yellow'
+		state = '*D'
+	elif action == 'ENABLE':
+		info = 'Enabling:'
+		color = 'green'
+		state = 'a'
+	else:
+		info = None
+		color = None
+		ctl_args = None
+		state = None
+
+	for pool in pools:
+		(listener, service, backends) = pool
+		l_index = listener[0]
+		l_ip = listener[1]
+		l_port = listener[2]
+		l_proto  = listener[3]
+		l_active = listener[4]
+
+		ipp = l_ip + ':' + l_port
+		if not ipp.startswith(opts.listener):
+			continue
+
+		if action == 'DISABLE':
+			if l_active == '*D':
+				print colorize_foreground('Already disabled:', 'white'), '%s:%s (%s)' % (l_ip, l_port, l_proto)
+				continue
+			ctl_args = ['-l', l_index]
+		elif action == 'ENABLE':
+			if l_active == 'a':
+				print colorize_foreground('Already enabled:', 'white'), '%s:%s (%s)' % (l_ip, l_port, l_proto)
+				continue
+			ctl_args = ['-L', l_index]
+
+		print colorize_foreground(info, color), '%s:%s (%s)' % (l_ip, l_port, l_proto),
+
+		(r, lines) = run_poundctl(ctl_args)
+		if r:
+			print colorize_foreground('FAILED', 'red')
+			for line in lines:
+				print line
+		else:
+			print colorize_foreground('DONE', 'white')
+			listener[4] = state
+
+
+def main():
+
+	if opts.version:
+		print 'Pooly %s' % (VERSION)
+		exit(0)
+
+	r, lines = run_poundctl([])
+
+	if r:
+		for line in lines:
+			print line
+		exit(1)
+
+	(pools, backend_alive_pings) = get_pools(lines)
+
+	if opts.enable_backends:
+		enable_backends(pools, backend_alive_pings, opts.enable_backends)
+
+	if opts.disable_backends:
+		disable_backends(pools, backend_alive_pings, opts.disable_backends)
+
+	if opts.enable_listener:
+		handle_listener(pools, opts.disable_listener, 'ENABLE')
+
+	if opts.disable_listener:
+		handle_listener(pools, opts.disable_listener, 'DISABLE')
+
+	if not (opts.enable_backends or opts.disable_backends or opts.enable_listener or opts.disable_listener):
+		show(pools, backend_alive_pings)
+
+main()
+
+
+# EXAMPLE POOL
+# listner: [1, 'hostname', '80', 'http', 'a']
+# service: (8, 'active')
+# backend: [(0, 'hostname-x', '80', 'active', 'alive', 'ipp'), (1, 'hostname-x', '80', 'active', 'alive', 'ipp')]
